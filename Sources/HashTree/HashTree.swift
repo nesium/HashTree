@@ -1,61 +1,53 @@
 import CryptoKit
 import Foundation
 
-public enum HashTree<Hash: Digest, Element> {
+public enum HashTree<Hash: Hashable> {
   case empty
   indirect case node(
     hash: Hash,
-    value: Element,
-    left: HashTree<Hash, Element>,
-    right: HashTree<Hash, Element>
+    left: HashTree<Hash>,
+    right: HashTree<Hash>
   )
 }
 
 extension HashTree {
   public init<Hasher: HashFunction, S: Sequence>(
     _: Hasher.Type,
-    leafNodes: S,
-    joinValues: (Element, Element) -> Element
-  ) where Hasher.Digest == Hash, S.Element == Self {
-    var nodesAndValues: [(node: Self, value: Element)] = leafNodes.compactMap { node in
-      guard case let HashTree.node(_, value, _, _) = node else {
-        return nil
-      }
-      return (node, value)
-    }
+    hashes: S
+  ) where Hasher.Digest == Hash, S.Element == Hash {
+    var nodes = hashes.map(Self.leaf)
 
-    guard !nodesAndValues.isEmpty else {
+    guard !nodes.isEmpty else {
       self = .empty
       return
     }
 
-    var result = [(node: Self, value: Element)]()
+    var result = [Self]()
 
-    while !nodesAndValues.isEmpty {
-      let left = nodesAndValues.removeFirst()
-      let right = nodesAndValues.isEmpty ? left : nodesAndValues.removeFirst()
-      let value = joinValues(left.value, right.value)
+    while !nodes.isEmpty {
+      let left = nodes.removeFirst()
+      let right = nodes.isEmpty ? left : nodes.removeFirst()
 
-      result.append((.parent(Hasher.self, value: value, left: left.node, right: right.node), value))
+      result.append(.parent(Hasher.self, left: left, right: right))
 
-      if nodesAndValues.isEmpty, result.count > 1 {
-        nodesAndValues = result
+      if nodes.isEmpty, result.count > 1 {
+        nodes = result
         result.removeAll()
       }
     }
 
-    self = result.first!.node
+    self = result.first!
   }
 
-  public static func leaf(hash: Hash, value: Element) -> HashTree<Hash, Element> {
-    .node(hash: hash, value: value, left: .empty, right: .empty)
+  public static func leaf(hash: Hash) -> HashTree<Hash> {
+    .node(hash: hash, left: .empty, right: .empty)
   }
 
   public static func parent<Hasher: HashFunction>(
-    _: Hasher.Type, value: Element, left: Self, right: Self
-  ) -> HashTree<Hasher.Digest, Element> where Hasher.Digest == Hash {
+    _: Hasher.Type, left: Self, right: Self
+  ) -> HashTree<Hasher.Digest> where Hasher.Digest == Hash {
     switch (left, right) {
-    case let (.node(leftHash, _, _, _), .node(rightHash, _, _, _)):
+    case let (.node(leftHash, _, _), .node(rightHash, _, _)):
       var hash = Hasher()
       leftHash.withUnsafeBytes { ptr in
         hash.update(bufferPointer: ptr)
@@ -63,23 +55,23 @@ extension HashTree {
       rightHash.withUnsafeBytes { ptr in
         hash.update(bufferPointer: ptr)
       }
-      return .node(hash: hash.finalize(), value: value, left: left, right: right)
+      return .node(hash: hash.finalize(), left: left, right: right)
 
-    case let (.node(leftHash, _, _, _), .empty):
+    case let (.node(leftHash, _, _), .empty):
       var hash = Hasher()
       leftHash.withUnsafeBytes { ptr in
         hash.update(bufferPointer: ptr)
         hash.update(bufferPointer: ptr)
       }
-      return .node(hash: hash.finalize(), value: value, left: left, right: right)
+      return .node(hash: hash.finalize(), left: left, right: right)
 
-    case let (.empty, .node(rightHash, _, _, _)):
+    case let (.empty, .node(rightHash, _, _)):
       var hash = Hasher()
       rightHash.withUnsafeBytes { ptr in
         hash.update(bufferPointer: ptr)
         hash.update(bufferPointer: ptr)
       }
-      return .node(hash: hash.finalize(), value: value, left: left, right: right)
+      return .node(hash: hash.finalize(), left: left, right: right)
 
     case (.empty, .empty):
       return .empty
@@ -90,20 +82,16 @@ extension HashTree {
 extension HashTree {
   var hash: Hash? {
     switch self {
-    case let .node(hash, _, _, _):
+    case let .node(hash, _, _):
       return hash
     case .empty:
       return nil
     }
   }
 
-  var hashString: String? {
-    self.hash?.compactMap { String(format: "%02x", $0) }.joined()
-  }
-
   var isLeaf: Bool {
     switch self {
-    case .node(_, _, .empty, .empty):
+    case .node(_, .empty, .empty):
       return true
     case .node:
       return false
@@ -111,21 +99,12 @@ extension HashTree {
       return true
     }
   }
-
-  var value: Element? {
-    switch self {
-    case let .node(_, value, _, _):
-      return value
-    case .empty:
-      return nil
-    }
-  }
 }
 
 extension HashTree: Hashable {
   public static func == (lhs: Self, rhs: Self) -> Bool {
     switch (lhs, rhs) {
-    case let (.node(lHash, _, _, _), .node(rHash, _, _, _)):
+    case let (.node(lHash, _, _), .node(rHash, _, _)):
       return lHash == rHash
     case (.empty, .empty):
       return true
@@ -140,26 +119,29 @@ extension HashTree: Hashable {
 }
 
 extension HashTree {
-  public func difference(from other: Self) -> Set<Self> {
+  public func difference(from other: Self) -> Set<Hash> {
     switch (self, other) {
-    case let (.node(lHash, _, ll, lr), .node(rHash, _, rl, rr)):
+    case let (.node(lHash, ll, lr), .node(rHash, rl, rr)):
       if lHash == rHash {
         return []
       }
 
-      if self.isLeaf {
-        return [self]
+      switch self {
+      case let .node(hash: hash, left: .empty, right: .empty):
+        return [hash]
+      case .node, .empty:
+        break
       }
 
-      var result = Set<Self>()
+      var result = Set<Hash>()
       result.formUnion(ll.difference(from: rl))
       result.formUnion(lr.difference(from: rr))
       return result
 
     case (.empty, .node):
-      return [self]
+      return []
     case (.node, .empty):
-      return [self]
+      return []
     case (.empty, .empty):
       return []
     }
